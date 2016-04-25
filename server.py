@@ -24,6 +24,7 @@
 import base_server
 import hashlib
 import json
+import logging
 import os
 import sys
 from cStringIO import StringIO
@@ -45,6 +46,8 @@ from threading import Thread, Event
 # Somehow, when using __file__ directly, we get "global name '__file__' is not
 # defined".
 FILE = __file__
+
+logger = logging.getLogger(__name__)
 
 
 class CommandHandler(base_server.CommandHandler):
@@ -302,6 +305,8 @@ def _run_command(job):
     '''
     Job handler for compilation and caching.
     '''
+    logger = logging.getLogger('server:run_command')
+    logger.debug("Running job with compiler %s", type(job['compiler'].__name__)
     id = job['id']
     compiler = job['compiler']
     args = job['args']
@@ -323,9 +328,11 @@ def _run_command(job):
         # line, and the compiler.
         # TODO: Remove preprocessor-only arguments from args (like -D, -I...)
         cache_key = hash_key(compiler, args, preprocessed)
+        logger.debug("Preprocessed. Cache key: %s", cache_key)
 
         if not 'SCCACHE_RECACHE' in os.environ and storage:
             # Get cached data if there is.
+            logger.debug("Attempting to get cached data for %s", cache_key)
             data = storage.get(cache_key)
             if data:
                 try:
@@ -333,6 +340,7 @@ def _run_command(job):
                 except:
                     pass
             if cache:
+                logger.debug("Cache created")
                 for key, path in outputs.items():
                     with open(path, 'wb') as obj:
                         obj.write(cache[key])
@@ -350,12 +358,15 @@ def _run_command(job):
             all(os.path.exists(out) for out in outputs.values()):
         try:
             cache = CacheData()
+            logger.debug("Cache Data instance created")
             cache['stdout'] = stdout
             cache['stderr'] = stderr
             for key, path in outputs.items():
                 with open(path, 'rb') as f:
+                    logger.debug("Reading data for %s", path)
                     cache[key] = f.read()
         except:
+            logger.warning("Caught error when creating Cache Data instance")
             cache = None
 
     if cache:
@@ -371,9 +382,11 @@ def _run_command(job):
     if cache:
         for retry in range(0, 3):
             if storage.put(cache_key, cache.data):
+                logger.debug("Attempting to store data for %s", cache_key)
                 yield dict(status='stored', stats=storage.last_stats)
                 break
             else:
+                logger.warning("Couldn't store data for %s", cache_key)
                 yield dict(status='storagefail')
 
 

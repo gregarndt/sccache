@@ -6,10 +6,12 @@
 
 import errno
 import httplib
+import logging
 import os
 import time
 import urllib2
 
+logger = logging.getLogger(__name__)
 
 def ensure_dir(path):
     if not os.path.exists(path):
@@ -43,6 +45,7 @@ class Storage(object):
 
     @staticmethod
     def from_environment():
+        logging.debug("Loading storage instance")
         '''
         Return a Storage instance matching the configuration in the
         environment.
@@ -62,23 +65,29 @@ class Storage(object):
             Storage._storage = Storage._iter.next()
             return Storage._storage
         except StopIteration:
+            logging.debug("No storage options, returning none")
             return None
 
     @staticmethod
     def _iter_storages():
         directory = os.environ.get('SCCACHE_DIR')
         if directory:
+            logging.debug("Creating Local Storage handler for directory '%s'", directory)
             yield LocalStorage(directory)
 
         bucket_name = os.environ.get('SCCACHE_BUCKET')
         if bucket_name:
+            logging.debug("SSCACHE bucket is set to '%s'", bucket_name)
+            logging.debug("Attempting to allocate boto/s3 storage")
             storage = BotoStorage(bucket_name,
                 dns_server=os.environ.get('SCCACHE_NAMESERVER'))
+            logging.debug("Loaded Boto Storage")
             yield storage
 
             if not isinstance(storage, S3Storage):
                 from boto import config
                 if config.getbool('s3', 'fallback', False):
+                    logging.debug("Loading fallback s3 storage handler")
                     yield S3Storage(bucket_name,
                         dns_server=os.environ.get('SCCACHE_NAMESERVER'))
 
@@ -127,6 +136,7 @@ class S3CompatibleStorage(Storage):
 
         assert bucket_name
         self._bucket_name = bucket_name
+        self.logger = logging.getLogger(type(self).__name__)
 
         from boto.s3.connection import S3Connection
         from boto.utils import find_class
@@ -155,6 +165,7 @@ class S3CompatibleStorage(Storage):
 
         self._bucket = s3_connection.get_bucket(self._bucket_name,
             validate=False)
+        self.logger("Retrieve s3 bucket %s", self._bucket)
 
         self.last_stats = {}
 
@@ -169,10 +180,12 @@ class S3CompatibleStorage(Storage):
                 self._normalize_key(key)))
         _last_stats.clear()
         try:
+            self.logger.debug("Attempting to get %s", url)
             data = self._url_opener.open(url, timeout=5).read()
             _last_stats['size'] = len(data)
             return data
         except Exception as e:
+            self.logger.warning("Could not open url %s", url)
             if not isinstance(e, urllib2.HTTPError) or e.code not in (404, 403):
                 self._failed = True
             return None
@@ -186,20 +199,25 @@ class S3CompatibleStorage(Storage):
         _last_stats.clear()
         _last_stats['size'] = len(data)
         try:
+            self.logger.debug("Creating new key: %s", self._normalize_key(key))
             k = self._bucket.new_key(self._normalize_key(key))
             k.set_contents_from_string(data, headers={
                 'x-amz-acl': 'public-read',
                 'x-amz-storage-class': 'REDUCED_REDUNDANCY',
                 'Cache-Control': 'max-age=1296000', # Two weeks
             })
+            self.logger.debug("Set Object ACL for: %s", self._normalize_key(key))
             return True
         except Exception as e:
+            self.logger.warning("Caught exception while creating key %s. %s", self._normalize_key(key), e)
+
             from boto.exception import S3ResponseError
             if isinstance(e, S3ResponseError) and e.status == 403 and \
                     e.error_code == 'SignatureDoesNotMatch':
                 # More often than it should, S3 returns a SignatureDoesNotMatch
                 # error. Consider it an error (returning False as such), but
                 # don't consider it hard enough to trigger a fallback.
+                self.logger.warning("Could not create key %s. Signature Mismatch", self._normalize_key(key))
                 return False
             self._failed = True
             return False
